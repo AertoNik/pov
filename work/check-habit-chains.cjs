@@ -1,0 +1,49 @@
+const fs=require('fs'),vm=require('vm'),assert=require('assert/strict');
+const source=fs.readFileSync('work/invariants.cjs','utf8').split("test('Новый профиль")[0];
+// Run the same application in an isolated context, with local form nodes only.
+eval(source.replace('const sandbox=','var sandbox=').replace('const dummy=','var dummy=').replace("const fs=require('fs'),vm=require('vm'),assert=require('assert/strict');",''));
+const nodes={};let form;
+const decode=s=>s.replace(/&quot;/g,'"').replace(/&#39;/g,"'").replace(/&lt;/g,'<').replace(/&gt;/g,'>').replace(/&amp;/g,'&');
+function attr(s,key){return decode(s.match(new RegExp('(?:^|\\s)'+key+'="([^"]*)"'))?.[1]||'')}
+function field(name,value='',type='text'){const n={...dummy,name,value,type,checked:false,options:[]};Object.defineProperty(n,'innerHTML',{get(){return this.html||''},set(html){this.html=html;const options=[...html.matchAll(/<option\b([^>]*)>([\s\S]*?)<\/option>/g)];if(options.length){this.options=options.map(m=>attr(m[1],'value'));this.value=attr((options.find(m=>/\bselected\b/.test(m[1]))||options[0])[1],'value')}}});return n}
+function parse(html){for(const m of html.matchAll(/<input\b([^>]*)>/g)){const name=attr(m[1],'name');if(!name)continue;const n=field(name,attr(m[1],'value'),attr(m[1],'type'));n.checked=/\bchecked\b/.test(m[1]);if(n.type==='checkbox'){form.checkboxes.push(n)}else form.elements[name]=n}for(const m of html.matchAll(/<textarea\b([^>]*)>([\s\S]*?)<\/textarea>/g)){const name=attr(m[1],'name');if(name)form.elements[name]=field(name,decode(m[2]),'textarea')}for(const m of html.matchAll(/<select\b([^>]*)>([\s\S]*?)<\/select>/g)){const name=attr(m[1],'name');if(name){const n=field(name);n.innerHTML=m[2];form.elements[name]=n}}}
+function node(id){const n={...dummy};Object.defineProperty(n,'innerHTML',{get(){return this.html||''},set(html){this.html=html;if(id==='#codex-details')parse(html)}});return n}
+sandbox.document.querySelector=s=>nodes[s]||(nodes[s]=node(s));sandbox.document.querySelectorAll=()=>[];
+sandbox.openForm=html=>{form={elements:{},checkboxes:[],reportValidity:()=>true};nodes['#growth-form']=form;parse(html)};
+sandbox.FormData=class{constructor(f){this.rows=[...Object.values(f.elements).map(x=>[x.name,x.value]),...f.checkboxes.filter(x=>x.checked).map(x=>[x.name,x.value])]}[Symbol.iterator](){return this.rows[Symbol.iterator]()}getAll(n){return this.rows.filter(r=>r[0]===n).map(r=>r[1])}get(n){return this.getAll(n)[0]??null}};
+vm.runInContext('state=freshState();Modal.open=(title,html)=>openForm(html);Modal.close=()=>{};',sandbox);
+function set(name,value){assert.ok(form.elements[name],name);form.elements[name].value=value}
+function checked(name,value){const x=form.checkboxes.find(x=>x.name===name&&x.value===String(value));assert.ok(x,name);x.checked=true}
+function submit(){nodes['#growth-error']??=node('#growth-error');form.onsubmit({preventDefault(){}});assert.equal(nodes['#growth-error'].textContent||'','');nodes['#growth-error'].textContent=''}
+
+const run=s=>vm.runInContext(s,sandbox);
+const originalOpen=sandbox.openForm;sandbox.openForm=html=>{originalOpen(html);form.querySelector=()=>({...dummy})};
+const OriginalDate=Date;
+function day(value){sandbox.Date=class extends OriginalDate{constructor(...args){super(...(args.length?args:[value+'T12:00:00']))}}}
+function transfer(id,modes={}){sandbox.transferId=id;run('GrowthUI.phaseCopyHabits(transferId)');for(const [id,mode] of Object.entries(modes))set('mode-'+id,mode);submit()}
+day('2026-10-01');
+run(`state=freshState();const phase=(id,startDate,endDate,phaseNumber)=>({id,name:id,startDate,endDate,phaseNumber,description:'',completedAt:null,goals:[],missionIds:[]});state.phases=[phase('p1','2026-09-04','2026-09-30',1),phase('p2','2026-10-01','2026-10-02',2),phase('p3','2026-10-03','2026-10-04',3)];const a=state.phases[0],attr=state.attributes[0].id;const habit=(id,name,startDate,phaseId,weekdays=[0,1,2,3,4,5,6])=>({id,name,description:'Настройки',category:'Язык',startDate,phaseId,active:true,deleted:false,weekdays,allocations:[{id:state.attributes[0].id,weight:100}],tiers:[{label:'5 минут',xp:5,duration:5},{label:'20 минут',xp:10,duration:20},{label:'40 минут',xp:15,duration:40}],schedule:[{from:startDate,phaseId,active:true,weekdays:[...weekdays]}]});state.habits=[habit('romanian','Румынский','2026-09-04','p1'),habit('reading','Чтение','2026-09-16','p1')];const record=(h,date)=>({id:uid(),habitId:h.id,phaseId:h.phaseId,title:h.name,date,time:date+'T12:00:00Z',tier:0,xp:5,duration:5,allocations:[{id:state.attributes[0].id,xp:5}]});for(let date='2026-09-04';date<='2026-09-30';date=addDays(date,1))state.habitCompletions.push(record(state.habits[0],date));for(let date='2026-09-16';date<='2026-09-30';date=addDays(date,1))state.habitCompletions.push(record(state.habits[1],date));const beforeRecords=JSON.stringify(state.habitCompletions),beforeReport=JSON.stringify(Growth.report(a)),oldXP=totalXP();`);
+assert.equal(run('Growth.habitStats(state.habits[0]).current'),27);assert.equal(run('Growth.habitStats(state.habits[1]).current'),15);
+run('GrowthUI.phaseCopyHabits("p2")');assert.equal(form.elements['mode-romanian'].value,'continue');assert.equal(form.elements['mode-reading'].value,'continue');set('mode-reading','restart');submit();
+run('const b=state.habits.find(h=>h.phaseId==="p2"&&h.name==="Румынский"),fresh=state.habits.find(h=>h.phaseId==="p2"&&h.name==="Чтение")');
+assert.equal(run('state.habits[0].habitChainId===b.habitChainId'),true);assert.notEqual(run('b.id'),'romanian');assert.equal(run('b.phaseId'),'p2');assert.equal(run('state.habits[0].phaseId'),'p1');assert.equal(run('Growth.habitStats(b).current'),27);assert.equal(run('Growth.habitStats(b).done'),0);assert.equal(run('Growth.habitStats(fresh).current'),0);assert.equal(run('fresh.habitChainId'),undefined);assert.equal(run('state.habits[1].habitChainId'),undefined);
+assert.equal(run('JSON.stringify(state.habitCompletions)===beforeRecords'),true);assert.equal(run('JSON.stringify(Growth.report(a))===beforeReport'),true);assert.equal(run('totalXP()===oldXP'),true);
+run('Growth.mark(b.id,today(),0)');assert.equal(run('Growth.habitStats(b).current'),28);assert.equal(run('Growth.habitStats(b).done'),1);assert.equal(run('Growth.habitStats(state.habits[0]).done'),27);assert.equal(run('Growth.habitStats(state.habits[1]).current'),15);
+assert.equal(run('JSON.stringify(Growth.report(a))===beforeReport'),true);assert.equal(run('Growth.report(state.phases[1]).done'),1);assert.equal(run('Growth.report(state.phases[1]).xp'),5);assert.equal(run('Growth.report(state.phases[1]).duration'),5);
+console.log('ПРОЙДЕНО: смешанные режимы, продолжение 27 → 28 и новая серия 0; история, опыт, минуты и отчёты фаз раздельны.');
+// Editing a continuation must preserve its chain, but using a template starts anew.
+run('GrowthUI.habitForm(b.id)');set('name','Румынский');submit();assert.equal(run('state.habits.find(h=>h.id===b.id).habitChainId'),run('b.habitChainId'));
+run('GrowthUI.handle("habit-template-save",{dataset:{id:b.id}})');assert.equal(run('"habitChainId" in state.userHabitTemplates[0]'),false);
+run('const saved=validateStateStrict(JSON.parse(BackupManager.serialize()).data)');assert.equal(run('saved.habits.find(h=>h.id===b.id).habitChainId'),run('b.habitChainId'));assert.equal(run('saved.habits.find(h=>h.id==="reading").habitChainId'),undefined);
+for(const value of [null,'',123,'<script>']){sandbox.badChain=value;assert.throws(()=>run('(()=>{const copy=structuredClone(state);copy.habits[0].habitChainId=badChain;validateStateStrict(copy)})()'))}
+day('2026-10-02');run('Growth.mark(b.id,today(),0)');assert.equal(run('Growth.habitStats(b).current'),29);
+day('2026-10-03');transfer('p3',{[run('fresh.id')]:'restart'});run('const c=state.habits.find(h=>h.phaseId==="p3"&&h.name==="Румынский");Growth.mark(c.id,today(),0)');assert.equal(run('Growth.habitStats(c).current'),30);assert.equal(run('new Set(state.habits.filter(h=>h.name==="Румынский").map(h=>h.id)).size'),3);assert.equal(run('new Set(state.habits.filter(h=>h.name==="Румынский").map(h=>h.habitChainId)).size'),1);
+run('Growth.undo(c.id,today())');assert.equal(run('Growth.habitStats(c).current'),29);
+day('2026-10-04');assert.equal(run('Growth.habitStats(c).current'),0);run('Growth.mark(c.id,today(),0)');assert.equal(run('Growth.habitStats(c).current'),1);
+assert.equal(run('JSON.stringify(Growth.report(a))===beforeReport'),true);
+console.log('ПРОЙДЕНО: три фазы 27 → 28 → 29 → 30, редактирование и импорт сохраняют цепочку; отмена и пропуск обрывают серию.');
+// A paused source is left untouched; both transfer modes create usable active habits.
+day('2026-10-03');run('state.habits=[habit("paused","На паузе","2026-09-04","p1")];state.habits[0].active=false;state.habits[0].schedule[0].active=false;const activeCopy=Growth.copyHabit(state.habits[0],state.phases[2],true),newCopy=Growth.copyHabit(state.habits[0],state.phases[2],false);state.habits.push(activeCopy,newCopy)');assert.equal(run('state.habits[0].active'),false);assert.equal(run('Growth.due(activeCopy,today())&&Growth.due(newCopy,today())&&activeCopy.active&&newCopy.active'),true);
+// A weekend with no required tasks does not break a continued weekday schedule.
+day('2026-09-28');run('state=freshState();state.phases=[phase("week1","2026-09-25","2026-09-27",1),phase("week2","2026-09-28","2026-10-02",2)];state.habits=[habit("weekday","По будням","2026-09-25","week1",[1,2,3,4,5])];state.habitCompletions=[record(state.habits[0],"2026-09-25")];const weekdayCopy=Growth.copyHabit(state.habits[0],state.phases[1],true);state.habits.push(weekdayCopy);Growth.mark(weekdayCopy.id,today(),0)');assert.equal(run('Growth.habitStats(weekdayCopy).current'),2);
+console.log('ПРОЙДЕНО: пауза исходной привычки сохраняется, копии активны; выходные не обрывают серию, старые привычки без цепочки совместимы.');
